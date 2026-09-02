@@ -1,12 +1,9 @@
 import * as THREE from "three";
-import {
-  SparkRenderer,
-  SparkControls,
-  SplatMesh,
-  SpzWriter,
-} from "@sparkjsdev/spark";
+import { SparkControls, SpzWriter } from "@sparkjsdev/spark";
 import { generateTree } from "./tree/generator";
 import { buildGaussians } from "./tree/gaussian-builder";
+import { buildWoodMesh } from "./tree/wood-mesh";
+import { buildFoliage } from "./tree/foliage";
 import { DEFAULT_PARAMS, type TreeParams } from "./tree/types";
 
 const scene = new THREE.Scene();
@@ -18,19 +15,38 @@ camera.lookAt(0, 3.5, 0);
 
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setSize(innerWidth, innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 document.body.appendChild(renderer.domElement);
 
-const spark = new SparkRenderer({ renderer });
-scene.add(spark);
+// lighting for mesh realism
+const sun = new THREE.DirectionalLight(0xfff4e0, 2.4);
+sun.position.set(8, 16, 6);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+sun.shadow.camera.near = 0.5;
+sun.shadow.camera.far = 60;
+sun.shadow.camera.left = -20;
+sun.shadow.camera.right = 20;
+sun.shadow.camera.top = 20;
+sun.shadow.camera.bottom = -20;
+scene.add(sun);
+scene.add(new THREE.AmbientLight(0x8899aa, 0.5));
 
-// ground grid for spatial reference
-const grid = new THREE.GridHelper(20, 20, 0x3a3f46, 0x2a2e35);
-grid.position.y = -0.01;
-scene.add(grid);
+// ground plane to receive shadow (replaces flat grid for shadow catch)
+const ground = new THREE.Mesh(
+  new THREE.PlaneGeometry(60, 60),
+  new THREE.MeshStandardMaterial({ color: 0x202428, roughness: 1, metalness: 0 }),
+);
+ground.rotation.x = -Math.PI / 2;
+ground.position.y = 0;
+ground.receiveShadow = true;
+scene.add(ground);
 
 const controls = new SparkControls({ canvas: renderer.domElement });
 
-let treeMesh: SplatMesh | null = null;
+let woodMesh: THREE.Mesh | null = null;
+let foliageMesh: THREE.InstancedMesh | null = null;
 
 function readParams(): TreeParams {
   const g = (id: string) => document.getElementById(id) as HTMLInputElement;
@@ -40,13 +56,13 @@ function readParams(): TreeParams {
     trunkRadius: Number(g("trunkRadius").value),
     levels: Number(g("levels").value),
     branchesPerLevel: Number(g("branchesPerLevel").value),
-    lengthFalloff: 0.72,
-    radiusFalloff: 0.62,
+    lengthFalloff: 0.7,
+    radiusFalloff: 0.6,
     branchAngle: Number(g("branchAngle").value),
     downAngle: Number(g("downAngle").value),
     spread: 137.5,
     leavesPerTip: Number(g("leavesPerTip").value),
-    leafSize: 0.45,
+    leafSize: 0.4,
     barkColor: DEFAULT_PARAMS.barkColor,
     leafColor: DEFAULT_PARAMS.leafColor,
   };
@@ -55,37 +71,21 @@ function readParams(): TreeParams {
 function regenerate() {
   const params = readParams();
   const skeleton = generateTree(params);
-  const gaussians = buildGaussians(skeleton, params);
 
-  const mesh = new SplatMesh({
-    constructSplats: (splats) => {
-      splats.ensureSplats(gaussians.length);
-      for (const g of gaussians) {
-        splats.pushSplat(
-          new THREE.Vector3(g.center.x, g.center.y, g.center.z),
-          new THREE.Vector3(g.scales.x, g.scales.y, g.scales.z),
-          new THREE.Quaternion(g.quaternion[0], g.quaternion[1], g.quaternion[2], g.quaternion[3]),
-          g.opacity,
-          new THREE.Color(g.color[0], g.color[1], g.color[2]),
-        );
-      }
-    },
-  });
+  // --- mesh trunk + branches ---
+  const wood = buildWoodMesh(skeleton);
+  if (woodMesh) { scene.remove(woodMesh); woodMesh.geometry.dispose(); }
+  scene.add(wood);
+  woodMesh = wood;
 
-  if (treeMesh) {
-    scene.remove(treeMesh);
-    treeMesh.dispose();
-  }
-  scene.add(mesh);
-  treeMesh = mesh;
+  // --- instanced leaf cards ---
+  const foliage = buildFoliage(skeleton);
+  if (foliageMesh) { scene.remove(foliageMesh); foliageMesh.geometry.dispose(); }
+  scene.add(foliage);
+  foliageMesh = foliage;
 
-  // frame the tree: bounding sphere of all branch endpoints
-  const box = new THREE.Box3();
-  const v = new THREE.Vector3();
-  for (const b of skeleton.branches) {
-    box.expandByPoint(v.set(b.start.x, b.start.y, b.start.z));
-    box.expandByPoint(v.set(b.end.x, b.end.y, b.end.z));
-  }
+  // frame camera
+  const box = new THREE.Box3().setFromObject(wood);
   const sphere = box.getBoundingSphere(new THREE.Sphere());
   const dist = sphere.radius / Math.tan(((camera.fov / 2) * Math.PI) / 180) * 1.15;
   camera.position.set(
@@ -96,7 +96,7 @@ function regenerate() {
   camera.lookAt(sphere.center);
 
   document.getElementById("stats")!.textContent =
-    `${gaussians.length.toLocaleString()} gaussians (${skeleton.branches.length} branches, ${skeleton.leaves.length} leaves)`;
+    `${skeleton.branches.length} branches, ${skeleton.leaves.length} leaves`;
 }
 
 function exportSpz() {
@@ -104,11 +104,7 @@ function exportSpz() {
   const skeleton = generateTree(params);
   const gaussians = buildGaussians(skeleton, params);
 
-  const writer = new SpzWriter({
-    numSplats: gaussians.length,
-    shDegree: 0,
-    fractionalBits: 12,
-  });
+  const writer = new SpzWriter({ numSplats: gaussians.length, shDegree: 0, fractionalBits: 12 });
   for (let i = 0; i < gaussians.length; i++) {
     const g = gaussians[i];
     writer.setCenter(i, g.center.x, g.center.y, g.center.z);
@@ -118,7 +114,7 @@ function exportSpz() {
     writer.setQuat(i, g.quaternion[0], g.quaternion[1], g.quaternion[2], g.quaternion[3]);
   }
   writer.finalize().then((fileBytes) => {
-    const out = new Uint8Array(fileBytes); // ensure ArrayBuffer-backed view for Blob
+    const out = new Uint8Array(fileBytes);
     const blob = new Blob([out], { type: "application/octet-stream" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -129,7 +125,7 @@ function exportSpz() {
   });
 }
 
-// bind UI sliders (regenerate is manual via button)
+// bind UI sliders
 for (const id of ["trunkHeight", "trunkRadius", "levels", "branchesPerLevel", "branchAngle", "downAngle", "leavesPerTip"]) {
   const el = document.getElementById(id) as HTMLInputElement;
   el.addEventListener("input", () => {
