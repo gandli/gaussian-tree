@@ -85,14 +85,17 @@ export function buildGaussians(skeleton: TreeSkeleton, p: TreeParams): Gaussian[
     _q.setFromUnitVectors(_up, pos.set(lf.normal.x, lf.normal.y, lf.normal.z).normalize());
     const quat: [number, number, number, number] = [_q.x, _q.y, _q.z, _q.w];
 
+    // canopy shading: darker lower (under-lit), lighter upper (sun-lit)
+    const heightShade = 0.7 + Math.min(1, Math.max(0, (lf.position.y - 1) / 10)) * 0.5;
+
     for (let k = 0; k < 4; k++) {
-      const s = lf.size * range(rng, 0.6, 1.0);
-      const shade = range(rng, 0.8, 1.2);
+      const s = lf.size * range(rng, 0.45, 0.7); // smaller discs → leaf detail, less cotton
+      const shade = range(rng, 0.85, 1.1) * heightShade;
       gs.push({
         center: {
-          x: lf.position.x + range(rng, -0.12, 0.12) * lf.size,
-          y: lf.position.y + range(rng, -0.12, 0.12) * lf.size,
-          z: lf.position.z + range(rng, -0.12, 0.12) * lf.size,
+          x: lf.position.x + range(rng, -0.1, 0.1) * lf.size,
+          y: lf.position.y + range(rng, -0.1, 0.1) * lf.size,
+          z: lf.position.z + range(rng, -0.1, 0.1) * lf.size,
         },
         scales: { x: s, y: s * 0.03, z: s }, // flat disc
         quaternion: quat,
