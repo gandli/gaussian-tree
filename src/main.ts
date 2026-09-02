@@ -55,7 +55,7 @@ function readParams(): TreeParams {
 function regenerate() {
   const params = readParams();
   const skeleton = generateTree(params);
-  const gaussians = buildGaussians(skeleton);
+  const gaussians = buildGaussians(skeleton, params);
 
   const mesh = new SplatMesh({
     constructSplats: (splats) => {
@@ -79,6 +79,22 @@ function regenerate() {
   scene.add(mesh);
   treeMesh = mesh;
 
+  // frame the tree: bounding sphere of all branch endpoints
+  const box = new THREE.Box3();
+  const v = new THREE.Vector3();
+  for (const b of skeleton.branches) {
+    box.expandByPoint(v.set(b.start.x, b.start.y, b.start.z));
+    box.expandByPoint(v.set(b.end.x, b.end.y, b.end.z));
+  }
+  const sphere = box.getBoundingSphere(new THREE.Sphere());
+  const dist = sphere.radius / Math.tan(((camera.fov / 2) * Math.PI) / 180) * 1.15;
+  camera.position.set(
+    sphere.center.x + dist * 0.55,
+    sphere.center.y + dist * 0.25,
+    sphere.center.z + dist * 0.8,
+  );
+  camera.lookAt(sphere.center);
+
   document.getElementById("stats")!.textContent =
     `${gaussians.length.toLocaleString()} gaussians (${skeleton.branches.length} branches, ${skeleton.leaves.length} leaves)`;
 }
@@ -86,7 +102,7 @@ function regenerate() {
 function exportSpz() {
   const params = readParams();
   const skeleton = generateTree(params);
-  const gaussians = buildGaussians(skeleton);
+  const gaussians = buildGaussians(skeleton, params);
 
   const writer = new SpzWriter({
     numSplats: gaussians.length,
