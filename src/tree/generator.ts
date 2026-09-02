@@ -33,41 +33,51 @@ export function generateTree(p: TreeParams): TreeSkeleton {
       endRadius: radius * p.radiusFalloff,
     });
 
-    if (level >= p.levels) {
-      // terminal branch → spawn leaves
-      for (let i = 0; i < p.leavesPerTip; i++) {
-        const t = range(rng, 0.3, 1.0);
+    const spawnLeaves = (count: number) => {
+      for (let i = 0; i < count; i++) {
+        const t = range(rng, 0.2, 1.0);
         const lp = origin.clone().lerp(end, t);
-        // random offset perpendicular to branch
+        // tight offset hugging the branch
         const perp = new THREE.Vector3(
           range(rng, -1, 1),
-          range(rng, -0.3, 0.5),
+          range(rng, -0.4, 0.6),
           range(rng, -1, 1),
         ).normalize();
-        lp.addScaledVector(perp, range(rng, 0.1, 0.6));
+        lp.addScaledVector(perp, range(rng, 0.05, 0.35));
         const normal = perp.clone().normalize();
+        // 30% young leaves (yellowish, sun-lit) vs mature (deep green) → breaks flat single-green
+        const young = rng() < 0.3;
+        const base: [number, number, number] = young
+          ? [p.leafColor[0] * 1.35, p.leafColor[1] * 1.2, p.leafColor[2] * 0.55]
+          : p.leafColor;
         leaves.push({
           position: { x: lp.x, y: lp.y, z: lp.z },
           normal: { x: normal.x, y: normal.y, z: normal.z },
           size: p.leafSize * range(rng, 0.7, 1.3),
           color: [
-            p.leafColor[0] * range(rng, 0.85, 1.15),
-            p.leafColor[1] * range(rng, 0.85, 1.15),
-            p.leafColor[2] * range(rng, 0.85, 1.15),
+            base[0] * range(rng, 0.85, 1.15),
+            base[1] * range(rng, 0.85, 1.15),
+            base[2] * range(rng, 0.85, 1.15),
           ],
         });
       }
+    };
+
+    if (level >= p.levels) {
+      spawnLeaves(p.leavesPerTip);
       return;
     }
+    // one level above terminal: half leaves so canopy hugs inner branches too
+    if (level === p.levels - 1) spawnLeaves(Math.round(p.leavesPerTip / 2));
 
-    const childLen = length * p.lengthFalloff;
-    const childRad = radius * p.radiusFalloff;
     const n = p.branchesPerLevel;
 
     for (let i = 0; i < n; i++) {
-      // golden-angle spread around parent axis
+      // first child = leader: continues nearly straight, longer (dominant-stem growth)
+      // remaining children spread wider and shorter — breaks the uniform Y-fork pattern
+      const isLeader = i === 0;
+      const theta = (isLeader ? range(rng, 8, 16) : p.branchAngle + range(rng, -12, 12)) * DEG;
       const phi = (angleAccum + i * p.spread) * DEG;
-      const theta = (p.branchAngle + range(rng, -8, 8)) * DEG;
       const downBias = p.downAngle * DEG * range(rng, 0.5, 1.0);
 
       // build child direction
@@ -77,22 +87,27 @@ export function generateTree(p: TreeParams): TreeSkeleton {
         Math.sin(theta) * Math.sin(phi),
       ).normalize();
 
-      // blend with parent direction for smoothness
-      childDir.lerp(direction, 0.25).normalize();
+      // blend with parent direction for smoothness (leader stronger)
+      childDir.lerp(direction, isLeader ? 0.55 : 0.2).normalize();
 
-      // jitter child length ±15%
-      const jitteredLen = childLen * range(rng, 0.85, 1.15);
+      const childLen =
+        length * p.lengthFalloff * (isLeader ? range(rng, 0.95, 1.1) : range(rng, 0.65, 0.9));
+      const childRad = radius * (isLeader ? p.radiusFalloff * 1.05 : p.radiusFalloff * 0.85);
 
       recurse(
         end,
         childDir,
-        jitteredLen,
+        childLen,
         childRad,
         level + 1,
         angleAccum + i * p.spread + range(rng, -10, 10),
       );
     }
   }
+
+  // slight trunk lean for naturalism
+  pos.set(0, 0, 0);
+  dir.set(range(rng, -0.07, 0.07), 1, range(rng, -0.07, 0.07)).normalize();
 
   recurse(pos, dir, p.trunkHeight, p.trunkRadius, 0, 0);
 
