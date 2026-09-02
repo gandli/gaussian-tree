@@ -1,71 +1,105 @@
 import * as THREE from "three";
-import type { TreeSkeleton, Gaussian } from "./types";
+import type { TreeSkeleton, Gaussian, TreeParams } from "./types";
+import { makeRng, range } from "./rng";
 
-const _q = new THREE.Quaternion();
-const _dir = new THREE.Vector3();
 const _up = new THREE.Vector3(0, 1, 0);
-const _quatArr: [number, number, number, number] = [0, 0, 0, 1];
+const _q = new THREE.Quaternion();
 
 /**
- * Convert a TreeSkeleton into an array of Gaussian primitives.
+ * Convert a TreeSkeleton into Gaussian primitives.
  *
- * Branches → elongated cylinders (scale.x ≈ scale.z ≈ radius, scale.y ≈ half-length).
- * Leaves   → flat discs (scale.x ≈ scale.z ≈ size, scale.y ≈ thin).
+ * Branches: dense overlapping spheres sampled along the segment axis
+ * (center + 6-point ring per station) → reads as a solid woody tube.
+ * Leaves:   clusters of small flat discs with per-disc color jitter.
+ *
+ * ponytail: fixed 6-point ring + 4-disc cluster; expose density knobs if needed.
  */
-export function buildGaussians(skeleton: TreeSkeleton): Gaussian[] {
+export function buildGaussians(skeleton: TreeSkeleton, p: TreeParams): Gaussian[] {
+  const rng = makeRng((p.seed ^ 0x9e3779b9) >>> 0);
   const gs: Gaussian[] = [];
 
-  // --- branches ---
+  const start = new THREE.Vector3();
+  const end = new THREE.Vector3();
+  const axis = new THREE.Vector3();
+  const u = new THREE.Vector3();
+  const v = new THREE.Vector3();
+  const center = new THREE.Vector3();
+  const pos = new THREE.Vector3();
+
   for (const b of skeleton.branches) {
-    const sx = b.start;
-    const ex = b.end;
-    const cx = (sx.x + ex.x) / 2;
-    const cy = (sx.y + ex.y) / 2;
-    const cz = (sx.z + ex.z) / 2;
-
-    _dir.set(ex.x - sx.x, ex.y - sx.y, ex.z - sx.z);
-    const len = _dir.length();
+    start.set(b.start.x, b.start.y, b.start.z);
+    end.set(b.end.x, b.end.y, b.end.z);
+    axis.copy(end).sub(start);
+    const len = axis.length();
     if (len < 1e-6) continue;
-    _dir.divideScalar(len);
+    axis.divideScalar(len);
 
-    // quaternion that rotates +Y to branch direction
-    _q.setFromUnitVectors(_up, _dir);
-    _quatArr[0] = _q.x;
-    _quatArr[1] = _q.y;
-    _quatArr[2] = _q.z;
-    _quatArr[3] = _q.w;
+    // orthonormal frame around the branch axis
+    if (Math.abs(axis.y) < 0.9) u.crossVectors(axis, _up);
+    else u.set(1, 0, 0);
+    u.normalize();
+    v.crossVectors(axis, u).normalize();
 
     const avgR = (b.startRadius + b.endRadius) / 2;
+    const rings = Math.max(1, Math.round(len / Math.max(avgR * 0.7, 1e-3)));
 
-    gs.push({
-      center: { x: cx, y: cy, z: cz },
-      scales: { x: avgR, y: len / 2, z: avgR },
-      quaternion: [..._quatArr],
-      opacity: 1,
-      color: [0.32, 0.24, 0.16], // bark
-    });
+    for (let i = 0; i <= rings; i++) {
+      const t = i / rings;
+      const r = b.startRadius + (b.endRadius - b.startRadius) * t;
+      center.copy(start).lerp(end, t);
+      const s = r * 0.9;
+      const shade = range(rng, 0.8, 1.2);
+      const color: [number, number, number] = [
+        p.barkColor[0] * shade,
+        p.barkColor[1] * shade,
+        p.barkColor[2] * shade,
+      ];
+
+      gs.push({
+        center: { x: center.x, y: center.y, z: center.z },
+        scales: { x: s, y: s, z: s },
+        quaternion: [0, 0, 0, 1],
+        opacity: 1,
+        color,
+      });
+
+      for (let k = 0; k < 6; k++) {
+        const a = (k / 6) * Math.PI * 2 + t * 4;
+        pos
+          .copy(u)
+          .multiplyScalar(Math.cos(a) * r * 0.8)
+          .addScaledVector(v, Math.sin(a) * r * 0.8)
+          .add(center);
+        gs.push({
+          center: { x: pos.x, y: pos.y, z: pos.z },
+          scales: { x: s, y: s, z: s },
+          quaternion: [0, 0, 0, 1],
+          opacity: 1,
+          color,
+        });
+      }
+    }
   }
 
-  // --- leaves ---
   for (const lf of skeleton.leaves) {
-    _dir.set(lf.normal.x, lf.normal.y, lf.normal.z);
-    if (_dir.lengthSq() < 1e-6) _dir.set(0, 1, 0);
-    _dir.normalize();
+    _q.setFromUnitVectors(_up, pos.set(lf.normal.x, lf.normal.y, lf.normal.z).normalize());
+    const quat: [number, number, number, number] = [_q.x, _q.y, _q.z, _q.w];
 
-    _q.setFromUnitVectors(_up, _dir);
-    _quatArr[0] = _q.x;
-    _quatArr[1] = _q.y;
-    _quatArr[2] = _q.z;
-    _quatArr[3] = _q.w;
-
-    const s = lf.size;
-    gs.push({
-      center: lf.position,
-      scales: { x: s, y: s * 0.05, z: s }, // flat disc
-      quaternion: [..._quatArr],
-      opacity: 0.85,
-      color: lf.color,
-    });
+    for (let k = 0; k < 4; k++) {
+      const s = lf.size * range(rng, 0.6, 1.0);
+      const shade = range(rng, 0.8, 1.2);
+      gs.push({
+        center: {
+          x: lf.position.x + range(rng, -0.12, 0.12) * lf.size,
+          y: lf.position.y + range(rng, -0.12, 0.12) * lf.size,
+          z: lf.position.z + range(rng, -0.12, 0.12) * lf.size,
+        },
+        scales: { x: s, y: s * 0.03, z: s }, // flat disc
+        quaternion: quat,
+        opacity: 1,
+        color: [lf.color[0] * shade, lf.color[1] * shade, lf.color[2] * shade],
+      });
+    }
   }
 
   return gs;
